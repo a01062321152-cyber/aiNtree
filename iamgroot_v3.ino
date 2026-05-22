@@ -3,33 +3,10 @@
   아이엠 그루트 (I Am Groot) v3
   팀: 아두이노 오브 갤럭시 (14조)
   =============================================
-  사용 부품:
-  - 토양 습도 센서 (Moisture)         → A0
-  - 조도 센서 (MH Sensor Series)      → A1 (아날로그 AO)
-  - DHT11 온습도 센서                 → D7
-  - LCD I2C (16x2)                    → SDA=A4, SCL=A5
-  - LED 빨강                           → D9
-  - LED 주황                           → D10
-  - LED 초록                           → D11
-  - 부저                               → D8
-  - 초음파 센서 (HC-SR04)             → TRIG=D5, ECHO=D6
-  =============================================
   [v3 변경사항]
-  - HC-SR04 초음파 센서 추가 (TRIG=D5, ECHO=D6)
-  - 감지 거리(GREET_DIST_CM) 이내 접근 시 환영 메시지 표시
-  - 환영 중에는 식물 상태 표시를 잠시 중단
-  - 환영 내용 시리얼 모니터 출력
-  =============================================
-  [초음파 센서 연결]
-  HC-SR04:
-    VCC  → 5V
-    GND  → GND
-    TRIG → D5
-    ECHO → D6
-  =============================================
-  필요 라이브러리:
-  - LiquidCrystal_I2C  (Frank de Brabander)
-  - DHT sensor library (Adafruit)
+  - 표정 2칸으로 확장 (14~15번 위치)
+  - 표정 디테일 개선
+  - 환영 메시지에 웃는 표정 추가
   =============================================
 */
 
@@ -37,25 +14,21 @@
 #include <LiquidCrystal_I2C.h>
 #include <DHT.h>
 
-// ─── LCD 설정 ────────────────────────────────
 LiquidCrystal_I2C lcd(0x27, 16, 2);
 
-// ─── DHT11 설정 ──────────────────────────────
 #define DHT_PIN     7
 #define DHT_TYPE    DHT11
 DHT dht(DHT_PIN, DHT_TYPE);
 
-// ─── 핀 설정 ─────────────────────────────────
 #define SOIL_PIN      A0
 #define LIGHT_PIN     A1
 #define LED_RED        9
 #define LED_ORANGE    10
 #define LED_GREEN     11
 #define BUZZER_PIN     8
-#define TRIG_PIN       5   // 초음파 TRIG
-#define ECHO_PIN       6   // 초음파 ECHO
+#define TRIG_PIN       5
+#define ECHO_PIN       6
 
-// ─── 센서 임계값 ──────────────────────────────
 #define SOIL_DRY      600
 #define SOIL_WET      300
 #define LIGHT_DARK    800
@@ -63,48 +36,165 @@ DHT dht(DHT_PIN, DHT_TYPE);
 #define TEMP_COLD     15.0
 #define HUMID_DRY     30.0
 
-// ─── 초음파 설정 ──────────────────────────────
-#define GREET_DIST_CM   20    // 이 거리(cm) 이하로 접근하면 환영
-#define GREET_COOLDOWN  8000  // 환영 후 재감지 대기 시간 (ms) — 너무 자주 울리지 않게
-#define GREET_SHOW_MS   3000  // 환영 메시지 표시 시간 (ms)
+#define GREET_DIST_CM   20
+#define GREET_COOLDOWN  8000
+#define GREET_SHOW_MS   3000
 
-// ─── 상태 정의 ───────────────────────────────
-enum State {
-  OVERWATER,
-  THIRSTY,
-  HOT,
-  COLD,
-  DARK,
-  AIR_DRY,
-  HAPPY
-};
+enum State { OVERWATER, THIRSTY, HOT, COLD, DARK, AIR_DRY, HAPPY };
 
 State currentState  = HAPPY;
 State prevState     = HAPPY;
-
 unsigned long lastCheck     = 0;
-unsigned long lastGreetTime = 0;   // 마지막 환영 시각
+unsigned long lastGreetTime = 0;
 bool          greeting      = false;
 unsigned long greetStart    = 0;
-
 const unsigned long CHECK_INTERVAL = 3000;
 
-// ─── 커스텀 캐릭터 ───────────────────────────
-byte happyFace[8]   = { B00000,B01010,B01010,B00000,B10001,B01110,B00000,B00000 };
-byte sadFace[8]     = { B00000,B01010,B11011,B01010,B00000,B01110,B10001,B00000 };
-byte hotFace[8]     = { B00100,B00100,B01010,B01010,B00000,B10001,B01110,B00000 };
-byte coldFace[8]    = { B00000,B10101,B01010,B10101,B00000,B11111,B00000,B00000 };
-byte darkFace[8]    = { B00000,B00000,B11011,B00000,B00000,B01110,B00000,B00000 };
-byte dryFace[8]     = { B00000,B01010,B01010,B00000,B01110,B10001,B10001,B01110 };
-byte shockedFace[8] = { B00000,B01010,B11011,B01010,B00000,B01110,B01010,B01110 };
+// ─── 커스텀 캐릭터 (좌/우 2칸 구성) ──────────
+/*
+  CGRAM 슬롯 배정:
+  0 = 행복 좌    1 = 행복 우
+  2 = 슬픔 좌    3 = 슬픔 우
+  4 = 더위 좌    5 = 더위 우
+  6 = 추위 좌    7 = 추위 우
 
-// ─── 환영 문구 목록 (랜덤 출력) ──────────────
+  ※ CGRAM은 0~7번 총 8슬롯만 가능
+     → 어두움/건조/과습은 행복/슬픔 슬롯 재활용
+       (해당 상태에선 happy/sad 문자를 다르게 씀)
+*/
+
+// 😊 행복 좌 (눈 ^, 볼)
+byte happyL[8] = {
+  B00011,  //    **
+  B00110,  //   **
+  B01100,  //  **
+  B01000,  //  *
+  B01011,  //  * **
+  B00110,  //   **
+  B00001,  //      *
+  B00000
+};
+
+// 😊 행복 우 (눈 ^, 볼)
+byte happyR[8] = {
+  B11000,  // **
+  B01100,  //  **
+  B00110,  //   **
+  B00010,  //    *
+  B11010,  // ** *
+  B01100,  //  **
+  B10000,  // *
+  B00000
+};
+
+// 😢 슬픔 좌 (눈 ㅠ, 눈물)
+byte sadL[8] = {
+  B00011,  //    **
+  B00110,  //   **
+  B01100,  //  **
+  B00001,  //      *
+  B01010,  //  * *
+  B00110,  //   **
+  B00001,  //      *
+  B00000
+};
+
+// 😢 슬픔 우
+byte sadR[8] = {
+  B11000,  // **
+  B01100,  //  **
+  B00110,  //   **
+  B10000,  // *
+  B01010,  //  * *
+  B01100,  //  **
+  B10000,  // *
+  B00000
+};
+
+// 🥵 더위 좌 (땀방울 + 찡그린 눈)
+byte hotL[8] = {
+  B00010,  //    *
+  B00101,  //   * *
+  B00010,  //    *
+  B01100,  //  **
+  B00100,  //   *
+  B01011,  //  * **
+  B00110,  //   **
+  B00000
+};
+
+// 🥵 더위 우
+byte hotR[8] = {
+  B01000,  //  *
+  B10100,  // * *
+  B01000,  //  *
+  B00110,  //   **
+  B00100,  //   *
+  B11010,  // ** *
+  B01100,  //  **
+  B00000
+};
+
+// 🥶 추위 좌 (떨리는 눈 + 이빨)
+byte coldL[8] = {
+  B01010,  //  * *
+  B10101,  // * * *
+  B01010,  //  * *
+  B00000,
+  B01111,  //  ****
+  B01010,  //  * *
+  B01111,  //  ****
+  B00000
+};
+
+// 🥶 추위 우
+byte coldR[8] = {
+  B01010,  //  * *
+  B10101,  // * * *
+  B01010,  //  * *
+  B00000,
+  B11110,  // **** 
+  B01010,  //  * *
+  B11110,  // ****
+  B00000
+};
+
+// ─── 상태별 표정 출력 함수 ───────────────────
+// CGRAM 슬롯이 8개뿐이라 4쌍(행복/슬픔/더위/추위)만 등록
+// 어두움→슬픔, 건조→슬픔, 과습→더위 슬롯 재활용
+
+void printFace(State state, int row) {
+  switch (state) {
+    case HAPPY:
+      lcd.setCursor(14, row); lcd.write(byte(0));
+      lcd.setCursor(15, row); lcd.write(byte(1));
+      break;
+    case THIRSTY:
+    case DARK:
+    case AIR_DRY:
+      lcd.setCursor(14, row); lcd.write(byte(2));
+      lcd.setCursor(15, row); lcd.write(byte(3));
+      break;
+    case HOT:
+    case OVERWATER:
+      lcd.setCursor(14, row); lcd.write(byte(4));
+      lcd.setCursor(15, row); lcd.write(byte(5));
+      break;
+    case COLD:
+      lcd.setCursor(14, row); lcd.write(byte(6));
+      lcd.setCursor(15, row); lcd.write(byte(7));
+      break;
+  }
+}
+
+// ─── 환영 문구 (2행 각 14글자, 나머지 2칸은 표정) ──
+// 14자 맞추기: "  Hello! :)   " (14자)
 const char* greetLines[][2] = {
-  { "  Hello! :)     ", " I am Groot~    " },
-  { " Welcome!       ", " Nice to see u! " },
-  { "  Hi there~     ", " I am Groot!    " },
-  { " Groot is happy!", "  Come closer~  " },
-  { "  Oh! A visitor!", " I am Groot :D  " },
+  { "  Hello! :)   ", " I am Groot~  " },
+  { " Welcome!     ", " Nice 2 see u " },
+  { "  Hi there~   ", " I am Groot!  " },
+  { " Groot happy! ", "  Come close~ " },
+  { " Oh!A visitor!", " I am Groot:D " },
 };
 const int GREET_COUNT = 5;
 
@@ -112,11 +202,9 @@ const int GREET_COUNT = 5;
 void setup() {
   Serial.begin(9600);
 
-  Serial.println();
   Serial.println(F("╔═════════════════════════════════════════╗"));
   Serial.println(F("║     I am Groot v3 - System Start        ║"));
   Serial.println(F("║     팀: 아두이노 오브 갤럭시 (14조)      ║"));
-  Serial.println(F("║     HC-SR04 초음파 센서 추가 버전        ║"));
   Serial.println(F("╚═════════════════════════════════════════╝"));
 
   pinMode(LED_RED,    OUTPUT);
@@ -131,18 +219,21 @@ void setup() {
   digitalWrite(LED_GREEN,  LOW);
   digitalWrite(TRIG_PIN,   LOW);
 
-  lcd.init();
+  lcd.begin(16, 2);
   lcd.backlight();
-  lcd.createChar(0, happyFace);
-  lcd.createChar(1, sadFace);
-  lcd.createChar(2, hotFace);
-  lcd.createChar(3, coldFace);
-  lcd.createChar(4, darkFace);
-  lcd.createChar(5, dryFace);
-  lcd.createChar(6, shockedFace);
+
+  // CGRAM 등록 (8슬롯 전부 사용)
+  lcd.createChar(0, happyL);
+  lcd.createChar(1, happyR);
+  lcd.createChar(2, sadL);
+  lcd.createChar(3, sadR);
+  lcd.createChar(4, hotL);
+  lcd.createChar(5, hotR);
+  lcd.createChar(6, coldL);
+  lcd.createChar(7, coldR);
 
   dht.begin();
-  randomSeed(analogRead(A3));  // 랜덤 시드 (미연결 핀 노이즈 활용)
+  randomSeed(analogRead(A3));
 
   showBootScreen();
   delay(2000);
@@ -157,29 +248,20 @@ void setup() {
 // ─────────────────────────────────────────────
 void loop() {
   unsigned long now = millis();
-
-  // ── 1) 초음파 거리 측정 (매 루프마다) ──────
   long dist = measureDistance();
 
-  // 환영 조건: 거리 이내 + 쿨다운 완료 + 현재 환영 중 아님
   if (dist > 0
       && dist <= GREET_DIST_CM
       && !greeting
       && (now - lastGreetTime >= GREET_COOLDOWN)) {
-
     startGreeting(dist, now);
   }
 
-  // 환영 표시 시간이 지나면 원래 화면으로 복귀
   if (greeting && (now - greetStart >= GREET_SHOW_MS)) {
     greeting = false;
-    // 즉시 식물 상태 화면 복원
-    updateLCD(currentState,
-              dht.readTemperature(),
-              dht.readHumidity());
+    updateLCD(currentState, dht.readTemperature(), dht.readHumidity());
   }
 
-  // ── 2) 식물 상태 측정 (3초 간격, 환영 중에도 측정은 계속) ──
   if (now - lastCheck >= CHECK_INTERVAL) {
     lastCheck = now;
 
@@ -189,17 +271,17 @@ void loop() {
     float humid      = dht.readHumidity();
 
     if (isnan(temp) || isnan(humid)) {
-      Serial.println(F("[!] DHT11 읽기 실패 - 다음 측정까지 대기"));
+      Serial.println(F("[!] DHT11 읽기 실패"));
       return;
     }
 
-    if      (soilValue <= SOIL_WET)   currentState = OVERWATER;
-    else if (soilValue >= SOIL_DRY)   currentState = THIRSTY;
-    else if (temp      >= TEMP_HOT)   currentState = HOT;
-    else if (temp      <= TEMP_COLD)  currentState = COLD;
-    else if (lightValue >= LIGHT_DARK) currentState = DARK;
-    else if (humid     <= HUMID_DRY)  currentState = AIR_DRY;
-    else                              currentState = HAPPY;
+    if      (soilValue  <= SOIL_WET)    currentState = OVERWATER;
+    else if (soilValue  >= SOIL_DRY)    currentState = THIRSTY;
+    else if (temp       >= TEMP_HOT)    currentState = HOT;
+    else if (temp       <= TEMP_COLD)   currentState = COLD;
+    else if (lightValue >= LIGHT_DARK)  currentState = DARK;
+    else if (humid      <= HUMID_DRY)   currentState = AIR_DRY;
+    else                                currentState = HAPPY;
 
     printLog(soilValue, lightValue, temp, humid, dist);
 
@@ -209,67 +291,61 @@ void loop() {
       prevState = currentState;
     }
 
-    // 환영 중이 아닐 때만 LCD 갱신
-    if (!greeting) {
-      updateLCD(currentState, temp, humid);
-    }
+    if (!greeting) updateLCD(currentState, temp, humid);
     updateLED(currentState);
   }
 }
 
-// ─── 초음파 거리 측정 ─────────────────────────
-// 반환값: 거리(cm). 측정 실패 시 -1 반환
+// ─── 초음파 거리 측정 ────────────────────────
 long measureDistance() {
   digitalWrite(TRIG_PIN, LOW);
   delayMicroseconds(2);
   digitalWrite(TRIG_PIN, HIGH);
   delayMicroseconds(10);
   digitalWrite(TRIG_PIN, LOW);
-
-  // 최대 대기 30ms (약 500cm) → 너무 멀면 -1 반환
   long duration = pulseIn(ECHO_PIN, HIGH, 30000);
   if (duration == 0) return -1;
-
-  long cm = duration / 58;  // 음속 변환 (29us/cm × 2)
-  return cm;
+  return duration / 58;
 }
 
-// ─── 환영 시작 ───────────────────────────────
+// ─── 환영 시작 (웃는 표정 2칸 포함) ─────────
 void startGreeting(long dist, unsigned long now) {
   greeting      = true;
   greetStart    = now;
   lastGreetTime = now;
 
-  int idx = random(GREET_COUNT);  // 랜덤 문구 선택
+  int idx = random(GREET_COUNT);
 
-  // LCD 환영 메시지
   lcd.clear();
-  lcd.setCursor(0, 0);
-  lcd.print(greetLines[idx][0]);
-  lcd.setCursor(0, 1);
-  lcd.print(greetLines[idx][1]);
 
-  // 환영 비프음 (경쾌하게 2음)
-  tone(BUZZER_PIN, 1047, 120); delay(160);  // C6
-  tone(BUZZER_PIN, 1319, 150); delay(200);  // E6
+  // 1행: 문구(14자) + 웃는 표정 좌우
+  lcd.setCursor(0, 0);
+  lcd.print(greetLines[idx][0]);   // 14자
+  lcd.setCursor(14, 0); lcd.write(byte(0));  // 행복 좌
+  lcd.setCursor(15, 0); lcd.write(byte(1));  // 행복 우
+
+  // 2행: 문구(14자) + 웃는 표정 좌우
+  lcd.setCursor(0, 1);
+  lcd.print(greetLines[idx][1]);   // 14자
+  lcd.setCursor(14, 1); lcd.write(byte(0));  // 행복 좌
+  lcd.setCursor(15, 1); lcd.write(byte(1));  // 행복 우
+
+  // 경쾌한 환영음
+  tone(BUZZER_PIN, 1047, 120); delay(160);
+  tone(BUZZER_PIN, 1319, 150); delay(200);
   noTone(BUZZER_PIN);
 
-  // 시리얼 출력
   Serial.println(F("╔═════════════════════════════════════════╗"));
   Serial.println(F("║            👋 방문자 감지!              ║"));
   Serial.println(F("╠═════════════════════════════════════════╣"));
   Serial.print(F("║  감지 거리 : "));
   Serial.print(dist);
-  Serial.println(F(" cm                        ║"));
-  Serial.print(F("║  메시지    : "));
+  Serial.println(F(" cm"));
 
-  // 공백 제거 후 시리얼 출력
-  String msg = String(greetLines[idx][0]);
-  msg.trim();
-  Serial.print(msg);
+  String msg = String(greetLines[idx][0]); msg.trim();
+  Serial.print(F("║  메시지    : ")); Serial.print(msg);
   Serial.print(F(" / "));
-  msg = String(greetLines[idx][1]);
-  msg.trim();
+  msg = String(greetLines[idx][1]); msg.trim();
   Serial.println(msg);
 
   Serial.println(F("╚═════════════════════════════════════════╝"));
@@ -281,6 +357,8 @@ void updateLCD(State state, float temp, float humid) {
   if (isnan(temp) || isnan(humid)) return;
 
   lcd.clear();
+
+  // 1행: 온습도 (최대 13자) + 여백
   lcd.setCursor(0, 0);
   lcd.print("T:");
   lcd.print((int)temp);
@@ -288,30 +366,20 @@ void updateLCD(State state, float temp, float humid) {
   lcd.print((int)humid);
   lcd.print("%");
 
+  // 2행: 상태 메시지 (13자) + 표정 2칸
   lcd.setCursor(0, 1);
   switch (state) {
-    case HAPPY:
-      lcd.print(" I'm happy~ ");
-      lcd.setCursor(15, 1); lcd.write(byte(0)); break;
-    case THIRSTY:
-      lcd.print(" Thirsty... ");
-      lcd.setCursor(15, 1); lcd.write(byte(1)); break;
-    case HOT:
-      lcd.print(" Too hot!   ");
-      lcd.setCursor(15, 1); lcd.write(byte(2)); break;
-    case COLD:
-      lcd.print(" Too cold!  ");
-      lcd.setCursor(15, 1); lcd.write(byte(3)); break;
-    case DARK:
-      lcd.print(" Dark zzz.. ");
-      lcd.setCursor(15, 1); lcd.write(byte(4)); break;
-    case AIR_DRY:
-      lcd.print(" Air dry... ");
-      lcd.setCursor(15, 1); lcd.write(byte(5)); break;
-    case OVERWATER:
-      lcd.print(" Too wet!   ");
-      lcd.setCursor(15, 1); lcd.write(byte(6)); break;
+    case HAPPY:     lcd.print(" I'm happy~  "); break;  // 13자
+    case THIRSTY:   lcd.print(" Thirsty...  "); break;
+    case HOT:       lcd.print(" Too hot!    "); break;
+    case COLD:      lcd.print(" Too cold!   "); break;
+    case DARK:      lcd.print(" Dark zzz... "); break;
+    case AIR_DRY:   lcd.print(" Air dry...  "); break;
+    case OVERWATER: lcd.print(" Too wet!    "); break;
   }
+
+  // 2행 14~15칸에 표정 출력
+  printFace(state, 1);
 }
 
 // ─── LED 제어 ────────────────────────────────
@@ -319,7 +387,6 @@ void updateLED(State state) {
   digitalWrite(LED_RED,    LOW);
   digitalWrite(LED_ORANGE, LOW);
   digitalWrite(LED_GREEN,  LOW);
-
   switch (state) {
     case OVERWATER: case THIRSTY: case HOT: case COLD:
       digitalWrite(LED_RED,    HIGH); break;
@@ -334,9 +401,8 @@ void updateLED(State state) {
 void playAlert(State state) {
   switch (state) {
     case THIRSTY:
-      tone(BUZZER_PIN, 880, 200); delay(350);
-      tone(BUZZER_PIN, 880, 200); delay(350);
-      break;
+      tone(BUZZER_PIN, 880,  200); delay(350);
+      tone(BUZZER_PIN, 880,  200); delay(350); break;
     case HOT:
       tone(BUZZER_PIN, 1500, 300); delay(450); break;
     case COLD:
@@ -348,8 +414,7 @@ void playAlert(State state) {
     case OVERWATER:
       tone(BUZZER_PIN, 1200, 150); delay(280);
       tone(BUZZER_PIN, 1200, 150); delay(280);
-      tone(BUZZER_PIN, 1200, 150); delay(280);
-      break;
+      tone(BUZZER_PIN, 1200, 150); delay(280); break;
     default: break;
   }
   noTone(BUZZER_PIN);
@@ -361,7 +426,8 @@ void printLog(int soil, int light, float temp, float humid, long dist) {
 
   Serial.println(F("┌─────────────────────────────────────────┐"));
   Serial.print(F("│ [I am Groot] 측정 "));
-  Serial.print(sec); Serial.println(F("초"));
+  Serial.print(sec / 60); Serial.print(F("분 "));
+  Serial.print(sec % 60); Serial.println(F("초"));
   Serial.println(F("├─────────────────────────────────────────┤"));
 
   Serial.print(F("│ 토양 습도  : ")); Serial.print(soil);
@@ -376,8 +442,8 @@ void printLog(int soil, int light, float temp, float humid, long dist) {
   Serial.print(F("│ 공기 습도  : ")); Serial.print(humid, 1);
   Serial.print(F("%\t[")); Serial.print(getHumidStatus(humid)); Serial.println(F("]"));
 
-  Serial.print(F("│ 초음파 거리: "));
-  if (dist < 0) Serial.println(F("측정 불가 (범위 초과)"));
+  Serial.print(F("│ 초음파     : "));
+  if (dist < 0) Serial.println(F("측정 불가"));
   else { Serial.print(dist); Serial.println(F(" cm")); }
 
   Serial.println(F("├─────────────────────────────────────────┤"));
@@ -389,12 +455,12 @@ void printLog(int soil, int light, float temp, float humid, long dist) {
 
 void printStateChange(State from, State to) {
   Serial.println(F("*** 상태 변경 ***"));
-  Serial.print(F("    ")); Serial.print(stateToString(from));
-  Serial.print(F(" -> ")); Serial.println(stateToString(to));
+  Serial.print(stateToString(from));
+  Serial.print(F(" -> "));
+  Serial.println(stateToString(to));
   Serial.println();
 }
 
-// ─── 문자열 헬퍼 ─────────────────────────────
 const char* stateToString(State s) {
   switch (s) {
     case HAPPY:     return "편안해요 ^_^";
@@ -441,7 +507,6 @@ const char* getHumidStatus(float v) {
   return "적정";
 }
 
-// ─── 부팅 화면 ───────────────────────────────
 void showBootScreen() {
   lcd.clear();
   lcd.setCursor(3, 0);
